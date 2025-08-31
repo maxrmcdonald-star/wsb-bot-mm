@@ -60,8 +60,8 @@ stocksymbol==0.0.5
 sympy==1.14.0
 textblob==0.19.0
 tifffile==2025.8.28
-torch==2.8.0+cu126
-torchvision==0.23.0+cu126
+torch
+torchvision
 tqdm==4.67.1
 typing_extensions==4.15.0
 tzdata==2025.2

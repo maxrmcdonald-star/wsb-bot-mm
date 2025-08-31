@@ -1,67 +1,58 @@
+# bot.py - The Core Analysis Engine
+import os
 import praw
 import pandas as pd
 import re
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import time
 import requests
 import yfinance as yf
-from datetime import datetime, timedelta
 import json
 import easyocr
 import io
-import os # Import the os library to read environment variables
+from datetime import datetime, timedelta
+# --- THIS IS THE FIX: Re-add the necessary imports ---
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
-# --- Import config.py (for local development fallback) ---
-try:
-    import config
-except ImportError:
-    config = None # Allows the script to run on Heroku where config.py won't exist
+# --- Import config.py ---
+import config
 
-# --- Display Settings and Initializations ---
+# --- All initializations now happen at the global level for efficiency ---
 pd.set_option('display.max_columns', None)
 pd.set_option('display.max_rows', None)
-pd.set_option('display.width', 1700)
-analyzer = SentimentIntensityAnalyzer()
+pd.set_option('display.width', 1600)
+analyzer = SentimentIntensityAnalyzer() # Initialize the sentiment analyzer once
 
-# --- Initialize the OCR Reader ---
-print("Initializing OCR reader... (this may take a moment on first run)")
-reader = easyocr.Reader(['en'])
+print("Initializing OCR reader...")
+reader = easyocr.Reader(['en']) # Initialize the OCR reader once
 print("OCR reader initialized.")
 
-# --- Global Cache for API results ---
+# --- Global caches ---
 earnings_calendar_df = None
 
-# --- UPDATED: API Key and Ticker Loading (checks Heroku first) ---
-FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY') or (config.FINNHUB_API_KEY if config else None)
+# --- API Key and Ticker Loading ---
+FINNHUB_API_KEY = config.FINNHUB_API_KEY
 
 def load_valid_tickers(api_key):
-    print("Loading valid tickers from Finnhub API... (Phase 1 of 3)")
-    if not api_key:
-        print("Error: Finnhub API key not found.")
-        return set()
+    print("Loading valid tickers from Finnhub API...")
+    if not api_key: return set()
     try:
         url = f'https://finnhub.io/api/v1/stock/symbol?exchange=US&token={api_key}'
         r = requests.get(url)
         r.raise_for_status()
         data = r.json()
-        valid_tickers = {
-            item['symbol'] for item in data 
-            if item.get('type') == 'Common Stock' and '.' not in item.get('symbol', '') and '-' not in item.get('symbol', '')
-        }
-        print(f"Successfully loaded {len(valid_tickers)} common stock tickers from Finnhub.")
+        valid_tickers = {item['symbol'] for item in data if item.get('type') == 'Common Stock' and '.' not in item.get('symbol', '') and '-' not in item.get('symbol', '')}
+        print(f"Successfully loaded {len(valid_tickers)} tickers.")
         return valid_tickers
-    except requests.exceptions.RequestException as e:
-        print(f"Error making API request to Finnhub: {e}")
+    except Exception as e:
+        print(f"Error loading tickers from Finnhub: {e}")
         return set()
+
 VALID_TICKERS = load_valid_tickers(FINNHUB_API_KEY)
 
-# --- Function to load the earnings calendar from Finnhub ---
 def load_earnings_calendar():
     global earnings_calendar_df
     print("Loading 1-week earnings calendar from Finnhub...")
-    if not FINNHUB_API_KEY:
-        print("Finnhub API key not found. Earnings dates will be unavailable.")
-        return
+    if not FINNHUB_API_KEY: return
     try:
         today = datetime.now().strftime('%Y-%m-%d')
         one_week_later = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
@@ -73,15 +64,12 @@ def load_earnings_calendar():
             earnings_calendar_df = pd.DataFrame(data['earningsCalendar'])
             earnings_calendar_df.rename(columns={'symbol': 'ticker', 'date': 'reportDate', 'hour': 'earningsHour'}, inplace=True)
             earnings_calendar_df['reportDate'] = pd.to_datetime(earnings_calendar_df['reportDate'])
-            print(f"Successfully loaded earnings calendar with {len(earnings_calendar_df)} upcoming events.")
-        else:
-            print("No upcoming earnings found in the next 7 days.")
     except Exception as e:
-        print(f"Could not load or parse earnings calendar from Finnhub: {e}")
-        print("Earnings dates will be unavailable for this run.")
-load_earnings_calendar()
+        print(f"Could not load earnings calendar: {e}")
 
-# --- Helper Functions (No changes needed here) ---
+load_earnings_calendar() # Load data once on startup
+
+# --- All helper functions remain the same ---
 def find_tickers(text):
     if not VALID_TICKERS: return []
     blacklist = {'AI', 'DD', 'CEO', 'ATH', 'FOR', 'ETH', 'DR', 'ONE', 'EDIT', 'BUY', 'SELL'}
@@ -112,9 +100,7 @@ def get_stock_price(ticker_str):
         ticker = yf.Ticker(ticker_str)
         price = ticker.info.get('currentPrice') or ticker.info.get('regularMarketPrice')
         return price if price is not None else 0.0
-    except Exception:
-        print(f"\n[Warning] yfinance: Could not find stock data for '{ticker_str}'.", end='')
-        return 0.0
+    except Exception: return 0.0
 def get_option_price(play_string):
     if not isinstance(play_string, str) or len(play_string.split()) != 3: return 0.0
     try:
@@ -137,9 +123,7 @@ def get_option_price(play_string):
             if price == 0.0 and 'ask' in contract.columns: price = contract.iloc[0]['ask']
             return price
         return 0.0
-    except Exception:
-        print(f"\n[Warning] yfinance: Error processing option '{play_string}'.", end='')
-        return 0.0
+    except Exception: return 0.0
 def get_next_earnings_info(ticker_str):
     if earnings_calendar_df is None or earnings_calendar_df.empty:
         return 'N/A', 'N/A'
@@ -164,18 +148,13 @@ def extract_text_from_image(image_url):
         response.raise_for_status()
         result = reader.readtext(response.content, detail=0, paragraph=True)
         return " ".join(result)
-    except Exception as e:
-        print(f"\n[Warning] OCR Error: Could not process image {image_url}. Error: {e}", end='')
-        return ""
+    except Exception: return ""
 
 def run_analysis():
-    # --- UPDATED: Reddit Connection now reads from Heroku environment or config file ---
+    # --- Reddit Connection is now inside the function ---
     ***REMOVED***
-        client_id=os.environ.get('CLIENT_ID') or (config.CLIENT_ID if config else None),
-        client_secret=os.environ.get('CLIENT_SECRET') or (config.CLIENT_SECRET if config else None),
-        user_agent=os.environ.get('USER_AGENT') or (config.USER_AGENT if config else None),
-        username=os.environ.get('USERNAME') or (config.USERNAME if config else None),
-        password=os.environ.get('PASSWORD') or (config.PASSWORD if config else None)
+        client_id=config.CLIENT_ID, client_secret=config.CLIENT_SECRET,
+        user_agent=config.USER_AGENT, username=config.USERNAME, password=config.PASSWORD
     )
     print("Successfully connected to Reddit for this request.")
     
