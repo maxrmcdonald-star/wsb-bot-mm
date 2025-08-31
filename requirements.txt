@@ -19,7 +19,7 @@ finnhub-python
 easyocr
 opencv-python-headless
 
-# --- PyTorch CPU-only versions for Heroku ---
---find-links https://download.pytorch.org/whl/cpu/torch_stable.html
-torch
-torchvision
+# --- PyTorch CPU-only versions for Heroku via Direct Links ---
+# This forces the installation of the small, CPU-only versions
+torch==2.1.0 --index-url https://download.pytorch.org/whl/cpu
+torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cpu
