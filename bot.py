@@ -10,6 +10,10 @@ import json
 import easyocr
 import io
 import os # Import the os library to read environment variables
+# app.py - The Flask Web Server
+# Version 1.1
+from flask import Flask, jsonify
+import bot
 
 # --- Import config.py (for local development fallback) ---
 try:
