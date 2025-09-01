@@ -14,13 +14,3 @@ yfinance
 requests
 alpha-vantage
 finnhub-python
-
-# Image Processing (OCR)
-# We list easyocr first, then explicitly demand the headless version of its dependency.
-easyocr
-opencv-python-headless
-
-# --- PyTorch CPU-only versions for Heroku via Direct Links ---
-# This forces the installation of the small, CPU-only versions.
-torch==2.1.0 --index-url https://download.pytorch.org/whl/cpu
-torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cpu```
