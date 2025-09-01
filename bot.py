@@ -1,47 +1,87 @@
-# bot.py (Cloud-Optimized Version)
-import praw, pandas as pd, re, time, requests, yfinance as yf, json
-from datetime import datetime, timedelta
+import praw
+import pandas as pd
+import re
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
-import config
+import time
+import requests
+import yfinance as yf
+from datetime import datetime, timedelta
+import json
+import easyocr
+import io
+import os
+
+# --- UPDATED: Robustly import config.py for local development ---
+try:
+    import config
+except ImportError:
+    config = None # Allows the script to run on Heroku/Render where config.py won't exist
 
 # --- Display Settings and Initializations ---
-pd.set_option('display.max_columns', None); pd.set_option('display.max_rows', None); pd.set_option('display.width', 1600)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_rows', None)
+pd.set_option('display.width', 1700)
 analyzer = SentimentIntensityAnalyzer()
 
-# --- Global Caches ---
+# --- Initialize the OCR Reader ---
+print("Initializing OCR reader... (this may take a moment on first run)")
+reader = easyocr.Reader(['en'])
+print("OCR reader initialized.")
+
+# --- Global Cache for API results ---
 earnings_calendar_df = None
 
-# --- API Keys and Ticker Loading ---
-FINNHUB_API_KEY = config.FINNHUB_API_KEY
+# --- API Key Loading (checks Heroku/Render first, then config.py) ---
+FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY') or (config.FINNHUB_API_KEY if config else None)
+
 def load_valid_tickers(api_key):
-    print("Loading valid tickers from Finnhub API...")
-    if not api_key: return set()
+    print("Loading valid tickers from Finnhub API... (Phase 1 of 3)")
+    if not api_key:
+        print("Error: Finnhub API key not found in environment variables or config.py.")
+        return set()
     try:
         url = f'https://finnhub.io/api/v1/stock/symbol?exchange=US&token={api_key}'
-        r = requests.get(url); r.raise_for_status(); data = r.json()
-        valid_tickers = {item['symbol'] for item in data if item.get('type') == 'Common Stock' and '.' not in item.get('symbol', '') and '-' not in item.get('symbol', '')}
-        print(f"Successfully loaded {len(valid_tickers)} tickers.")
+        r = requests.get(url)
+        r.raise_for_status()
+        data = r.json()
+        valid_tickers = {
+            item['symbol'] for item in data 
+            if item.get('type') == 'Common Stock' and '.' not in item.get('symbol', '') and '-' not in item.get('symbol', '')
+        }
+        print(f"Successfully loaded {len(valid_tickers)} common stock tickers from Finnhub.")
         return valid_tickers
-    except Exception as e: print(f"Error loading tickers from Finnhub: {e}"); return set()
+    except requests.exceptions.RequestException as e:
+        print(f"Error making API request to Finnhub: {e}")
+        return set()
 VALID_TICKERS = load_valid_tickers(FINNHUB_API_KEY)
 
+# --- Function to load the earnings calendar from Finnhub ---
 def load_earnings_calendar():
     global earnings_calendar_df
     print("Loading 1-week earnings calendar from Finnhub...")
-    if not FINNHUB_API_KEY: return
+    if not FINNHUB_API_KEY:
+        print("Finnhub API key not found. Earnings dates will be unavailable.")
+        return
     try:
         today = datetime.now().strftime('%Y-%m-%d')
         one_week_later = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
         url = f'https://finnhub.io/api/v1/calendar/earnings?from={today}&to={one_week_later}&token={FINNHUB_API_KEY}'
-        r = requests.get(url); r.raise_for_status(); data = r.json()
+        r = requests.get(url)
+        r.raise_for_status()
+        data = r.json()
         if 'earningsCalendar' in data and data['earningsCalendar']:
             earnings_calendar_df = pd.DataFrame(data['earningsCalendar'])
             earnings_calendar_df.rename(columns={'symbol': 'ticker', 'date': 'reportDate', 'hour': 'earningsHour'}, inplace=True)
             earnings_calendar_df['reportDate'] = pd.to_datetime(earnings_calendar_df['reportDate'])
-    except Exception as e: print(f"Could not load earnings calendar: {e}")
+            print(f"Successfully loaded earnings calendar with {len(earnings_calendar_df)} upcoming events.")
+        else:
+            print("No upcoming earnings found in the next 7 days.")
+    except Exception as e:
+        print(f"Could not load or parse earnings calendar from Finnhub: {e}")
+        print("Earnings dates will be unavailable for this run.")
 load_earnings_calendar()
 
-# --- Helper Functions ---
+# --- Helper Functions (No changes needed here) ---
 def find_tickers(text):
     if not VALID_TICKERS: return []
     blacklist = {'AI', 'DD', 'CEO', 'ATH', 'FOR', 'ETH', 'DR', 'ONE', 'EDIT', 'BUY', 'SELL'}
@@ -72,7 +112,9 @@ def get_stock_price(ticker_str):
         ticker = yf.Ticker(ticker_str)
         price = ticker.info.get('currentPrice') or ticker.info.get('regularMarketPrice')
         return price if price is not None else 0.0
-    except Exception: return 0.0
+    except Exception:
+        print(f"\n[Warning] yfinance: Could not find stock data for '{ticker_str}'.", end='')
+        return 0.0
 def get_option_price(play_string):
     if not isinstance(play_string, str) or len(play_string.split()) != 3: return 0.0
     try:
@@ -95,7 +137,9 @@ def get_option_price(play_string):
             if price == 0.0 and 'ask' in contract.columns: price = contract.iloc[0]['ask']
             return price
         return 0.0
-    except Exception: return 0.0
+    except Exception:
+        print(f"\n[Warning] yfinance: Error processing option '{play_string}'.", end='')
+        return 0.0
 def get_next_earnings_info(ticker_str):
     if earnings_calendar_df is None or earnings_calendar_df.empty:
         return 'N/A', 'N/A'
@@ -114,48 +158,66 @@ def get_next_earnings_info(ticker_str):
     else:
         next_earnings_str = next_earnings_date.strftime('%Y-%m-%d')
     return next_earnings_str, earnings_time
-
-# --- OCR Function is now disabled for cloud deployment ---
 def extract_text_from_image(image_url):
-    return ""
+    try:
+        response = requests.get(image_url)
+        response.raise_for_status()
+        result = reader.readtext(response.content, detail=0, paragraph=True)
+        return " ".join(result)
+    except Exception as e:
+        print(f"\n[Warning] OCR Error: Could not process image {image_url}. Error: {e}", end='')
+        return ""
 
 def run_analysis():
-    # --- Reddit Connection and Data Collection ---
+    # --- Reddit Connection now reads from Heroku/Render environment or config file ---
     ***REMOVED***
-        client_id=config.CLIENT_ID, client_secret=config.CLIENT_SECRET,
-        user_agent=config.USER_AGENT, username=config.USERNAME, password=config.PASSWORD
+        client_id=os.environ.get('CLIENT_ID') or (config.CLIENT_ID if config else None),
+        client_secret=os.environ.get('CLIENT_SECRET') or (config.CLIENT_SECRET if config else None),
+        user_agent=os.environ.get('USER_AGENT') or (config.USER_AGENT if config else None),
+        username=os.environ.get('USERNAME') or (config.USERNAME if config else None),
+        password=os.environ.get('PASSWORD') or (config.PASSWORD if config else None)
     )
+    print("Successfully connected to Reddit for this request.")
+    
+    # --- Data Collection Loop ---
     subreddit = reddit.subreddit("wallstreetbets")
     total_posts_to_fetch = 25
+    print(f"\nFetching pinned & {total_posts_to_fetch} recent posts...")
     all_ticker_mentions, all_plays_found = [], []
-    stickied_posts = []
-    try:
-        stickied_posts.append(subreddit.sticky(number=1))
-        stickied_posts.append(subreddit.sticky(number=2))
-    except Exception: pass
-    posts_to_process = stickied_posts
-    for post in subreddit.new(limit=total_posts_to_fetch):
-        if not post.stickied:
-            posts_to_process.append(post)
-    for post in posts_to_process:
-        if post:
-            post_score = post.score
-            full_text = post.title + " " + post.selftext
-            sentiment = get_sentiment(full_text)
-            tickers = find_tickers(full_text)
-            plays = find_plays(full_text)
-            for ticker in tickers: all_ticker_mentions.append({'ticker': ticker, 'sentiment': sentiment, 'score': post_score})
-            all_plays_found.extend(plays)
-            post.comments.replace_more(limit=0)
-            for comment in post.comments.list():
-                comment_score = comment.score
-                sentiment = get_sentiment(comment.body)
-                tickers = find_tickers(comment.body)
-                plays = find_plays(comment.body)
-                for ticker in tickers: all_ticker_mentions.append({'ticker': ticker, 'sentiment': sentiment, 'score': comment_score})
+    if VALID_TICKERS:
+        stickied_posts = []
+        try:
+            stickied_posts.append(subreddit.sticky(number=1))
+            stickied_posts.append(subreddit.sticky(number=2))
+        except Exception: pass
+        posts_to_process = stickied_posts
+        for post in subreddit.new(limit=total_posts_to_fetch):
+            if not post.stickied:
+                posts_to_process.append(post)
+        for i, post in enumerate(posts_to_process):
+            if post:
+                post_score = post.score
+                post_text = post.title + " " + post.selftext
+                image_text = ""
+                if hasattr(post, 'url') and post.url.endswith(('.jpg', '.jpeg', '.png')):
+                    image_text = extract_text_from_image(post.url)
+                full_text = post_text + " " + image_text
+                sentiment = get_sentiment(full_text)
+                tickers = find_tickers(full_text)
+                plays = find_plays(full_text)
+                for ticker in tickers: all_ticker_mentions.append({'ticker': ticker, 'sentiment': sentiment, 'score': post_score})
                 all_plays_found.extend(plays)
-
+                post.comments.replace_more(limit=0)
+                for comment in post.comments.list():
+                    comment_score = comment.score
+                    sentiment = get_sentiment(comment.body)
+                    tickers = find_tickers(comment.body)
+                    plays = find_plays(comment.body)
+                    for ticker in tickers: all_ticker_mentions.append({'ticker': ticker, 'sentiment': sentiment, 'score': comment_score})
+                    all_plays_found.extend(plays)
+    
     # --- Aggregation and Final Processing ---
+    print("\n\nAggregating results and fetching prices...")
     if not all_ticker_mentions:
         return pd.DataFrame(), pd.DataFrame()
     
@@ -169,14 +231,21 @@ def run_analysis():
     if all_plays_found:
         df_plays = pd.DataFrame(all_plays_found, columns=['play_string'])
         df_plays['ticker'] = df_plays['play_string'].str.split(' ').str[0]
-        play_summary_df = df_plays.groupby('ticker').agg(Top_Play=('play_string', lambda x: x.value_counts().index[0]), Top_Play_Mentions=('play_string', lambda x: x.value_counts().iloc[0]), Total_Options_Chatter=('play_string', 'count')).reset_index()
+        play_summary_df = df_plays.groupby('ticker').agg(
+            Top_Play=('play_string', lambda x: x.value_counts().index[0]),
+            Top_Play_Mentions=('play_string', lambda x: x.value_counts().iloc[0]),
+            Total_Options_Chatter=('play_string', 'count')
+        ).reset_index()
         final_df = summary_df.merge(play_summary_df, on='ticker', how='left')
     else:
         final_df = summary_df.copy()
         final_df[['Top_Play', 'Top_Play_Mentions', 'Total_Options_Chatter']] = 'N/A'
+
     final_df.reset_index(inplace=True)
     final_df[['Stock Price', 'Option Price', 'Breakeven Price', 'Breakeven % Change']] = 0.0
     final_df[['Next Earnings', 'Earnings Time']] = 'N/A'
+    
+    total_tickers_to_fetch = len(final_df)
     for index, row in final_df.iterrows():
         stock_price = get_stock_price(row['ticker'])
         option_price = get_option_price(row['Top_Play'])
@@ -197,11 +266,17 @@ def run_analysis():
                 final_df.loc[index, 'Breakeven % Change'] = percent_change
             except Exception: pass
     
-    final_df = final_df.rename(columns={'mention_count': 'Mentions', 'average_sentiment': 'Sentiment', 'hype_score': 'Score', 'Top_Play': 'Top Play', 'Top_Play_Mentions': 'Top Play Mentions', 'Total_Options_Chatter': 'Options Chatter'})
+    final_df = final_df.rename(columns={
+        'mention_count': 'Mentions', 'average_sentiment': 'Sentiment',
+        'hype_score': 'Score', 'Top_Play': 'Top Play',
+        'Top_Play_Mentions': 'Top Play Mentions', 'Total_Options_Chatter': 'Options Chatter'
+    })
     final_df.fillna({'Top Play': 'N/A', 'Top Play Mentions': 0, 'Options Chatter': 0, 'Next Earnings': 'N/A', 'Earnings Time': 'N/A'}, inplace=True)
+    
     numeric_cols = ['Score', 'Breakeven Price', 'Breakeven % Change']
     for col in numeric_cols: final_df[col] = final_df[col].round(2)
     final_df['Sentiment'] = final_df['Sentiment'].round(4)
+    
     final_cols = ['Mentions', 'Sentiment', 'Score', 'Stock Price', 'Top Play', 'Top Play Mentions', 'Options Chatter', 'Option Price', 'Breakeven Price', 'Breakeven % Change', 'Next Earnings', 'Earnings Time']
     final_df = final_df[final_cols]
     
