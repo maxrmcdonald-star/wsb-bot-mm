@@ -12,10 +12,4 @@ yfinance
 
 # APIs & Networking
 requests
-alpha-vantage
 finnhub-python
-
-# Image Processing (OCR)
-easyocr
-opencv-python-headless
-# torch and torchvision will be installed automatically as dependencies of easyocr

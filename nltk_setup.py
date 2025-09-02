@@ -7,15 +7,13 @@ import requests
 import yfinance as yf
 from datetime import datetime, timedelta
 import json
-import easyocr
-import io
 import os
 
-# --- UPDATED: Robustly import config.py for local development ---
+# --- Import config.py (for local development fallback) ---
 try:
     import config
 except ImportError:
-    config = None # Allows the script to run on Heroku/Render where config.py won't exist
+    config = None
 
 # --- Display Settings and Initializations ---
 pd.set_option('display.max_columns', None)
@@ -23,21 +21,16 @@ pd.set_option('display.max_rows', None)
 pd.set_option('display.width', 1700)
 analyzer = SentimentIntensityAnalyzer()
 
-# --- Initialize the OCR Reader ---
-print("Initializing OCR reader... (this may take a moment on first run)")
-reader = easyocr.Reader(['en'])
-print("OCR reader initialized.")
-
 # --- Global Cache for API results ---
 earnings_calendar_df = None
 
-# --- API Key Loading (checks Heroku/Render first, then config.py) ---
+# --- API Key and Ticker Loading (from config.py) ---
 FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY') or (config.FINNHUB_API_KEY if config else None)
 
 def load_valid_tickers(api_key):
     print("Loading valid tickers from Finnhub API... (Phase 1 of 3)")
     if not api_key:
-        print("Error: Finnhub API key not found in environment variables or config.py.")
+        print("Error: Finnhub API key not found.")
         return set()
     try:
         url = f'https://finnhub.io/api/v1/stock/symbol?exchange=US&token={api_key}'
@@ -48,14 +41,13 @@ def load_valid_tickers(api_key):
             item['symbol'] for item in data 
             if item.get('type') == 'Common Stock' and '.' not in item.get('symbol', '') and '-' not in item.get('symbol', '')
         }
-        print(f"Successfully loaded {len(valid_tickers)} common stock tickers from Finnhub.")
+        print(f"Successfully loaded {len(valid_tickers)} tickers.")
         return valid_tickers
     except requests.exceptions.RequestException as e:
         print(f"Error making API request to Finnhub: {e}")
         return set()
 VALID_TICKERS = load_valid_tickers(FINNHUB_API_KEY)
 
-# --- Function to load the earnings calendar from Finnhub ---
 def load_earnings_calendar():
     global earnings_calendar_df
     print("Loading 1-week earnings calendar from Finnhub...")
@@ -81,7 +73,7 @@ def load_earnings_calendar():
         print("Earnings dates will be unavailable for this run.")
 load_earnings_calendar()
 
-# --- Helper Functions (No changes needed here) ---
+# --- Helper Functions ---
 def find_tickers(text):
     if not VALID_TICKERS: return []
     blacklist = {'AI', 'DD', 'CEO', 'ATH', 'FOR', 'ETH', 'DR', 'ONE', 'EDIT', 'BUY', 'SELL'}
@@ -112,9 +104,7 @@ def get_stock_price(ticker_str):
         ticker = yf.Ticker(ticker_str)
         price = ticker.info.get('currentPrice') or ticker.info.get('regularMarketPrice')
         return price if price is not None else 0.0
-    except Exception:
-        print(f"\n[Warning] yfinance: Could not find stock data for '{ticker_str}'.", end='')
-        return 0.0
+    except Exception: return 0.0
 def get_option_price(play_string):
     if not isinstance(play_string, str) or len(play_string.split()) != 3: return 0.0
     try:
@@ -137,9 +127,7 @@ def get_option_price(play_string):
             if price == 0.0 and 'ask' in contract.columns: price = contract.iloc[0]['ask']
             return price
         return 0.0
-    except Exception:
-        print(f"\n[Warning] yfinance: Error processing option '{play_string}'.", end='')
-        return 0.0
+    except Exception: return 0.0
 def get_next_earnings_info(ticker_str):
     if earnings_calendar_df is None or earnings_calendar_df.empty:
         return 'N/A', 'N/A'
@@ -158,19 +146,9 @@ def get_next_earnings_info(ticker_str):
     else:
         next_earnings_str = next_earnings_date.strftime('%Y-%m-%d')
     return next_earnings_str, earnings_time
-def extract_text_from_image(image_url):
-    try:
-        response = requests.get(image_url)
-        response.raise_for_status()
-        result = reader.readtext(response.content, detail=0, paragraph=True)
-        return " ".join(result)
-    except Exception as e:
-        print(f"\n[Warning] OCR Error: Could not process image {image_url}. Error: {e}", end='')
-        return ""
 
 def run_analysis():
-    # --- Reddit Connection now reads from Heroku/Render environment or config file ---
-    ***REMOVED***
+    reddit = praw.Reddit(
         client_id=os.environ.get('CLIENT_ID') or (config.CLIENT_ID if config else None),
         client_secret=os.environ.get('CLIENT_SECRET') or (config.CLIENT_SECRET if config else None),
         user_agent=os.environ.get('USER_AGENT') or (config.USER_AGENT if config else None),
@@ -179,7 +157,6 @@ def run_analysis():
     )
     print("Successfully connected to Reddit for this request.")
     
-    # --- Data Collection Loop ---
     subreddit = reddit.subreddit("wallstreetbets")
     total_posts_to_fetch = 25
     print(f"\nFetching pinned & {total_posts_to_fetch} recent posts...")
@@ -197,11 +174,8 @@ def run_analysis():
         for i, post in enumerate(posts_to_process):
             if post:
                 post_score = post.score
-                post_text = post.title + " " + post.selftext
-                image_text = ""
-                if hasattr(post, 'url') and post.url.endswith(('.jpg', '.jpeg', '.png')):
-                    image_text = extract_text_from_image(post.url)
-                full_text = post_text + " " + image_text
+                # OCR is removed from the cloud version
+                full_text = post.title + " " + post.selftext
                 sentiment = get_sentiment(full_text)
                 tickers = find_tickers(full_text)
                 plays = find_plays(full_text)
@@ -216,7 +190,6 @@ def run_analysis():
                     for ticker in tickers: all_ticker_mentions.append({'ticker': ticker, 'sentiment': sentiment, 'score': comment_score})
                     all_plays_found.extend(plays)
     
-    # --- Aggregation and Final Processing ---
     print("\n\nAggregating results and fetching prices...")
     if not all_ticker_mentions:
         return pd.DataFrame(), pd.DataFrame()
@@ -240,12 +213,9 @@ def run_analysis():
     else:
         final_df = summary_df.copy()
         final_df[['Top_Play', 'Top_Play_Mentions', 'Total_Options_Chatter']] = 'N/A'
-
     final_df.reset_index(inplace=True)
     final_df[['Stock Price', 'Option Price', 'Breakeven Price', 'Breakeven % Change']] = 0.0
     final_df[['Next Earnings', 'Earnings Time']] = 'N/A'
-    
-    total_tickers_to_fetch = len(final_df)
     for index, row in final_df.iterrows():
         stock_price = get_stock_price(row['ticker'])
         option_price = get_option_price(row['Top_Play'])
@@ -266,17 +236,11 @@ def run_analysis():
                 final_df.loc[index, 'Breakeven % Change'] = percent_change
             except Exception: pass
     
-    final_df = final_df.rename(columns={
-        'mention_count': 'Mentions', 'average_sentiment': 'Sentiment',
-        'hype_score': 'Score', 'Top_Play': 'Top Play',
-        'Top_Play_Mentions': 'Top Play Mentions', 'Total_Options_Chatter': 'Options Chatter'
-    })
+    final_df = final_df.rename(columns={'mention_count': 'Mentions', 'average_sentiment': 'Sentiment', 'hype_score': 'Score', 'Top_Play': 'Top Play', 'Top_Play_Mentions': 'Top Play Mentions', 'Total_Options_Chatter': 'Options Chatter'})
     final_df.fillna({'Top Play': 'N/A', 'Top Play Mentions': 0, 'Options Chatter': 0, 'Next Earnings': 'N/A', 'Earnings Time': 'N/A'}, inplace=True)
-    
     numeric_cols = ['Score', 'Breakeven Price', 'Breakeven % Change']
     for col in numeric_cols: final_df[col] = final_df[col].round(2)
     final_df['Sentiment'] = final_df['Sentiment'].round(4)
-    
     final_cols = ['Mentions', 'Sentiment', 'Score', 'Stock Price', 'Top Play', 'Top Play Mentions', 'Options Chatter', 'Option Price', 'Breakeven Price', 'Breakeven % Change', 'Next Earnings', 'Earnings Time']
     final_df = final_df[final_cols]
     
