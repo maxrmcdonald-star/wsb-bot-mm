@@ -1,8 +1,15 @@
-# bot.py (Cloud-Optimized Version)
-import praw, pandas as pd, re, time, requests, yfinance as yf, json
-from datetime import datetime, timedelta
+# bot.py (Definitive Final Version)
+import praw
+import pandas as pd
+import re
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
+import time
+import requests
+import yfinance as yf
+from datetime import datetime, timedelta
+import json
 import os
+import nltk # <-- Import NLTK itself
 
 # --- Import config.py (for local development fallback) ---
 try:
@@ -12,6 +19,15 @@ except ImportError:
 
 # --- Display Settings and Initializations ---
 pd.set_option('display.max_columns', None); pd.set_option('display.max_rows', None); pd.set_option('display.width', 1600)
+
+# --- NEW: Download NLTK data on startup ---
+# This runs once when the server process starts, ensuring the data is in the runtime environment.
+try:
+    print("Downloading NLTK vader_lexicon...")
+    nltk.download('vader_lexicon')
+    print("NLTK vader_lexicon downloaded successfully.")
+except Exception as e:
+    print(f"Error downloading NLTK data: {e}")
 analyzer = SentimentIntensityAnalyzer()
 
 # --- Global Caches ---
@@ -134,7 +150,6 @@ def get_next_earnings_info(ticker_str):
     return next_earnings_str, earnings_time
 
 def run_analysis():
-    # --- Reddit Connection now reads from Heroku/Render environment or config file ---
     reddit = praw.Reddit(
         client_id=os.environ.get('CLIENT_ID') or (config.CLIENT_ID if config else None),
         client_secret=os.environ.get('CLIENT_SECRET') or (config.CLIENT_SECRET if config else None),
@@ -144,7 +159,6 @@ def run_analysis():
     )
     print("Successfully connected to Reddit for this request.")
     
-    # --- Data Collection Loop ---
     subreddit = reddit.subreddit("wallstreetbets")
     total_posts_to_fetch = 25
     print(f"\nFetching pinned & {total_posts_to_fetch} recent posts...")
@@ -177,7 +191,6 @@ def run_analysis():
                     for ticker in tickers: all_ticker_mentions.append({'ticker': ticker, 'sentiment': sentiment, 'score': comment_score})
                     all_plays_found.extend(plays)
     
-    # --- Aggregation and Final Processing ---
     print("\n\nAggregating results and fetching prices...")
     if not all_ticker_mentions:
         return pd.DataFrame(), pd.DataFrame()
