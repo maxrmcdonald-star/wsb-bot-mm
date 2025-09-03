@@ -1,32 +1,29 @@
-# app.py - The Flask Web Server
+# app.py
 from flask import Flask, jsonify
-import bot # Import our analysis script
+import redis
+import os
+import json
 
 app = Flask(__name__)
+REDIS_URL = os.environ.get('REDIS_URL')
 
-# This is our main API endpoint.
-# When someone visits our website's URL, this function will run.
 @app.route('/')
 def get_summary():
-    print("Request received! Running WSB analysis...")
-    # Call the main function from our bot script
-    earnings_df, no_earnings_df = bot.run_analysis()
-    
-    # Convert the pandas DataFrames to a JSON-friendly format (a list of dictionaries)
-    earnings_json = earnings_df.reset_index().to_dict(orient='records')
-    no_earnings_json = no_earnings_df.reset_index().to_dict(orient='records')
-    
-    # Create the final JSON response for our mobile app
-    response_data = {
-        "tickers_with_earnings": earnings_json,
-        "other_tickers": no_earnings_json,
-        "last_updated": bot.datetime.now().isoformat()
-    }
-    
-    print("Analysis complete. Sending JSON response.")
-    # The jsonify function correctly formats our data as a web response
-    return jsonify(response_data)
+    if not REDIS_URL:
+        return jsonify({"error": "Redis not configured"}), 500
+    try:
+        r = redis.from_url(REDIS_URL)
+        # Get the latest summary from the cache
+        cached_data = r.get('wsb_summary')
+        if cached_data:
+            # If data exists, return it
+            return jsonify(json.loads(cached_data))
+        else:
+            # If cache is empty (worker hasn't run yet), return a waiting message
+            return jsonify({"status": "Analysis in progress. Please check back in a few minutes."})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-# This allows us to run the server locally for testing
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)

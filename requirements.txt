@@ -13,3 +13,4 @@ yfinance
 # APIs & Networking
 requests
 finnhub-python
+redis
